@@ -1,0 +1,597 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "provenance": []
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "cells": [
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {
+        "id": "FVDqCvENLpO0"
+      },
+      "outputs": [],
+      "source": [
+        "#Library import\n",
+        "!pip install psycopg2-binary sqlalchemy\n",
+        "import pandas as pd\n",
+        "import numpy as np\n",
+        "import matplotlib.pyplot as plt\n",
+        "import seaborn as sns\n",
+        "from sqlalchemy import create_engine\n",
+        "from sqlalchemy.engine import URL\n",
+        "from sqlalchemy import create_engine, text"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#connect to SQL\n",
+        "USERNAME = \"USERNAME\"\n",
+        "PASSWORD = \"PASSWORD\"\n",
+        "HOST = \"HOST\"\n",
+        "PORT = \"PORT\"\n",
+        "DATABASE = \"DATABASE\"\n",
+        "\n",
+        "engine = create_engine(\n",
+        "    f\"postgresql+psycopg2://{USERNAME}:{PASSWORD}@{HOST}:{PORT}/{DATABASE}\"\n",
+        ")\n",
+        "\n",
+        "try:\n",
+        "    with engine.connect() as conn:\n",
+        "        result = conn.execute(text(\"SELECT 1\"))\n",
+        "        print(\"KONEKSI BERHASIL:\", result.fetchone())\n",
+        "except Exception as e:\n",
+        "    print(\"ERROR:\")\n",
+        "    print(e)"
+      ],
+      "metadata": {
+        "id": "qrOxNkv2L9Xb"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#Table import from SQL\n",
+        "accounts = pd.read_sql(\"SELECT * FROM accounts;\", engine)\n",
+        "subscriptions = pd.read_sql(\"SELECT * FROM subscriptions;\", engine)\n",
+        "feature_usage = pd.read_sql(\"SELECT * FROM feature_usage;\", engine)\n",
+        "support_tickets = pd.read_sql(\"SELECT * FROM support_tickets;\", engine)\n",
+        "churn_events = pd.read_sql(\"SELECT * FROM churn_events;\", engine)\n",
+        "\n",
+        "print(\"accounts:\", accounts.shape)\n",
+        "print(\"subscriptions:\", subscriptions.shape)\n",
+        "print(\"feature_usage:\", feature_usage.shape)\n",
+        "print(\"support_tickets:\", support_tickets.shape)\n",
+        "print(\"churn_events:\", churn_events.shape)"
+      ],
+      "metadata": {
+        "id": "m9a6SGZBMNa6"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#Set master_query as master table (joining 5 tables)\n",
+        "master_query = \"\"\"\n",
+        "WITH subscription_summary AS (\n",
+        "    SELECT\n",
+        "        account_id,\n",
+        "        COUNT(DISTINCT subscription_id) AS total_subscriptions,\n",
+        "        SUM(mrr_amount) AS total_mrr,\n",
+        "        SUM(arr_amount) AS total_arr,\n",
+        "        AVG(mrr_amount) AS avg_mrr,\n",
+        "        MAX(mrr_amount) AS max_mrr,\n",
+        "        SUM(CASE WHEN upgrade_flag THEN 1 ELSE 0 END) AS total_upgrades,\n",
+        "        SUM(CASE WHEN downgrade_flag THEN 1 ELSE 0 END) AS total_downgrades,\n",
+        "        SUM(CASE WHEN churn_flag THEN 1 ELSE 0 END) AS subscription_churn_events\n",
+        "    FROM subscriptions\n",
+        "    GROUP BY account_id\n",
+        "),\n",
+        "\n",
+        "usage_summary AS (\n",
+        "    SELECT\n",
+        "        s.account_id,\n",
+        "        COUNT(DISTINCT f.usage_id) AS total_usage_records,\n",
+        "        SUM(f.usage_count) AS total_usage_count,\n",
+        "        SUM(f.usage_duration_secs) AS total_usage_duration_secs,\n",
+        "        SUM(f.error_count) AS total_errors,\n",
+        "        COUNT(DISTINCT f.feature_name) AS unique_features_used,\n",
+        "        SUM(\n",
+        "            CASE\n",
+        "                WHEN f.is_beta_feature THEN 1\n",
+        "                ELSE 0\n",
+        "            END\n",
+        "        ) AS beta_usage_records\n",
+        "    FROM feature_usage f\n",
+        "    JOIN subscriptions s\n",
+        "        ON f.subscription_id = s.subscription_id\n",
+        "    GROUP BY s.account_id\n",
+        "),\n",
+        "\n",
+        "support_summary AS (\n",
+        "    SELECT\n",
+        "        account_id,\n",
+        "        COUNT(DISTINCT ticket_id) AS total_tickets,\n",
+        "        AVG(resolution_time_hours) AS avg_resolution_time_hours,\n",
+        "        AVG(first_response_time_minutes) AS avg_first_response_minutes,\n",
+        "        AVG(satisfaction_score) AS avg_satisfaction_score,\n",
+        "        SUM(\n",
+        "            CASE\n",
+        "                WHEN escalation_flag THEN 1\n",
+        "                ELSE 0\n",
+        "            END\n",
+        "        ) AS total_escalations\n",
+        "    FROM support_tickets\n",
+        "    GROUP BY account_id\n",
+        "),\n",
+        "\n",
+        "churn_summary AS (\n",
+        "    SELECT\n",
+        "        account_id,\n",
+        "        COUNT(DISTINCT churn_event_id) AS total_churn_events,\n",
+        "        MIN(churn_date) AS first_churn_date,\n",
+        "        MAX(churn_date) AS latest_churn_date,\n",
+        "        SUM(refund_amount_usd) AS total_refund_amount,\n",
+        "        SUM(\n",
+        "            CASE\n",
+        "                WHEN preceding_upgrade_flag THEN 1\n",
+        "                ELSE 0\n",
+        "            END\n",
+        "        ) AS preceding_upgrade_events,\n",
+        "        SUM(\n",
+        "            CASE\n",
+        "                WHEN preceding_downgrade_flag THEN 1\n",
+        "                ELSE 0\n",
+        "            END\n",
+        "        ) AS preceding_downgrade_events,\n",
+        "        SUM(\n",
+        "            CASE\n",
+        "                WHEN is_reactivation THEN 1\n",
+        "                ELSE 0\n",
+        "            END\n",
+        "        ) AS reactivation_events\n",
+        "    FROM churn_events\n",
+        "    GROUP BY account_id\n",
+        ")\n",
+        "\n",
+        "SELECT\n",
+        "    a.account_id,\n",
+        "    a.account_name,\n",
+        "    a.industry,\n",
+        "    a.country,\n",
+        "    a.signup_date,\n",
+        "    a.referral_source,\n",
+        "    a.plan_tier,\n",
+        "    a.seats,\n",
+        "    a.is_trial,\n",
+        "    a.churn_flag,\n",
+        "\n",
+        "    COALESCE(ss.total_subscriptions, 0) AS total_subscriptions,\n",
+        "    COALESCE(ss.total_mrr, 0) AS total_mrr,\n",
+        "    COALESCE(ss.total_arr, 0) AS total_arr,\n",
+        "    COALESCE(ss.avg_mrr, 0) AS avg_mrr,\n",
+        "    COALESCE(ss.max_mrr, 0) AS max_mrr,\n",
+        "    COALESCE(ss.total_upgrades, 0) AS total_upgrades,\n",
+        "    COALESCE(ss.total_downgrades, 0) AS total_downgrades,\n",
+        "    COALESCE(ss.subscription_churn_events, 0) AS subscription_churn_events,\n",
+        "\n",
+        "    COALESCE(us.total_usage_records, 0) AS total_usage_records,\n",
+        "    COALESCE(us.total_usage_count, 0) AS total_usage_count,\n",
+        "    COALESCE(us.total_usage_duration_secs, 0) AS total_usage_duration_secs,\n",
+        "    COALESCE(us.total_errors, 0) AS total_errors,\n",
+        "    COALESCE(us.unique_features_used, 0) AS unique_features_used,\n",
+        "    COALESCE(us.beta_usage_records, 0) AS beta_usage_records,\n",
+        "\n",
+        "    COALESCE(sp.total_tickets, 0) AS total_tickets,\n",
+        "    COALESCE(sp.avg_resolution_time_hours, 0) AS avg_resolution_time_hours,\n",
+        "    COALESCE(sp.avg_first_response_minutes, 0) AS avg_first_response_minutes,\n",
+        "    COALESCE(sp.avg_satisfaction_score, 0) AS avg_satisfaction_score,\n",
+        "    COALESCE(sp.total_escalations, 0) AS total_escalations,\n",
+        "\n",
+        "    COALESCE(cs.total_churn_events, 0) AS total_churn_events,\n",
+        "    cs.first_churn_date,\n",
+        "    cs.latest_churn_date,\n",
+        "    COALESCE(cs.total_refund_amount, 0) AS total_refund_amount,\n",
+        "    COALESCE(cs.preceding_upgrade_events, 0) AS preceding_upgrade_events,\n",
+        "    COALESCE(cs.preceding_downgrade_events, 0) AS preceding_downgrade_events,\n",
+        "    COALESCE(cs.reactivation_events, 0) AS reactivation_events\n",
+        "\n",
+        "FROM accounts a\n",
+        "\n",
+        "LEFT JOIN subscription_summary ss\n",
+        "    ON a.account_id = ss.account_id\n",
+        "\n",
+        "LEFT JOIN usage_summary us\n",
+        "    ON a.account_id = us.account_id\n",
+        "\n",
+        "LEFT JOIN support_summary sp\n",
+        "    ON a.account_id = sp.account_id\n",
+        "\n",
+        "LEFT JOIN churn_summary cs\n",
+        "    ON a.account_id = cs.account_id\n",
+        "\n",
+        "ORDER BY a.account_id;\n",
+        "\"\"\"\n",
+        "#set as dataframe\n",
+        "master_df = pd.read_sql(master_query, engine)\n",
+        "#data shape\n",
+        "print(\"Shape:\", master_df.shape)\n",
+        "print(\"\\nKolom:\")\n",
+        "print(master_df.columns.tolist())\n",
+        "\n",
+        "print(\"\\n5 data pertama:\")\n",
+        "display(master_df.head())"
+      ],
+      "metadata": {
+        "id": "mfxOuh-aMeKm"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "**EDA**"
+      ],
+      "metadata": {
+        "id": "dVZdvWaSNEyH"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "print(master_df.info())"
+      ],
+      "metadata": {
+        "id": "JXbuuDLdM4YK"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#missing value\n",
+        "master_df.isnull().sum()"
+      ],
+      "metadata": {
+        "id": "qnN-lvkBNBtv"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#make sure first_churn_date and latest_churn_date have missing value\n",
+        "print(\"Total accounts:\", len(master_df))\n",
+        "\n",
+        "print(\n",
+        "    \"Accounts without churn:\",\n",
+        "    master_df[\"first_churn_date\"].isna().sum()\n",
+        ")\n",
+        "\n",
+        "print(\n",
+        "    \"Accounts with churn:\",\n",
+        "    master_df[\"first_churn_date\"].notna().sum()\n",
+        ")"
+      ],
+      "metadata": {
+        "id": "jD9z7fCaNVXD"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "master_df.describe().T"
+      ],
+      "metadata": {
+        "id": "QJzIn2UINWKf"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#check duplicate account_id\n",
+        "print(\"Duplicate account_id:\",\n",
+        "      master_df[\"account_id\"].duplicated().sum())"
+      ],
+      "metadata": {
+        "id": "TvyrfumNNZds"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#check churn distribution\n",
+        "churn_count = master_df[\"churn_flag\"].value_counts()\n",
+        "\n",
+        "print(churn_count)"
+      ],
+      "metadata": {
+        "id": "DCkyhYBCNiWA"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#comparing matrics churn and active\n",
+        "comparison = (\n",
+        "    master_df\n",
+        "    .groupby(\"churn_status\")[\n",
+        "        [\n",
+        "            \"seats\",\n",
+        "            \"total_mrr\",\n",
+        "            \"total_usage_count\",\n",
+        "            \"unique_features_used\",\n",
+        "            \"total_errors\",\n",
+        "            \"total_tickets\",\n",
+        "            \"avg_resolution_time_hours\",\n",
+        "            \"avg_first_response_minutes\",\n",
+        "            \"avg_satisfaction_score\"\n",
+        "        ]\n",
+        "    ]\n",
+        "    .mean()\n",
+        "    .round(2)\n",
+        ")\n",
+        "\n",
+        "comparison"
+      ],
+      "metadata": {
+        "id": "t1d0k5XuNpz8"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#Ensuring cleanliness to prevent coalescing issues in SQL\n",
+        "master_df[\"satisfaction_clean\"] = (\n",
+        "    master_df[\"avg_satisfaction_score\"]\n",
+        "    .replace(0, np.nan)\n",
+        ")"
+      ],
+      "metadata": {
+        "id": "1CTVhUgpN430"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#feature engineering\n",
+        "master_df[\"usage_per_seat\"] = (\n",
+        "    master_df[\"total_usage_count\"] / master_df[\"seats\"]\n",
+        ")\n",
+        "\n",
+        "master_df[\"tickets_per_seat\"] = (\n",
+        "    master_df[\"total_tickets\"] / master_df[\"seats\"]\n",
+        ")\n",
+        "\n",
+        "master_df[\"mrr_per_seat\"] = (\n",
+        "    master_df[\"total_mrr\"] / master_df[\"seats\"]\n",
+        ")"
+      ],
+      "metadata": {
+        "id": "8gLYjgvDOHHG"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#compare engineering status\n",
+        "feature_summary = (\n",
+        "    master_df\n",
+        "    .groupby(\"churn_status\")[\n",
+        "        [\n",
+        "            \"usage_per_seat\",\n",
+        "            \"tickets_per_seat\",\n",
+        "            \"mrr_per_seat\"\n",
+        "        ]\n",
+        "    ]\n",
+        "    .mean()\n",
+        "    .round(2)\n",
+        ")\n",
+        "\n",
+        "feature_summary"
+      ],
+      "metadata": {
+        "id": "GX6lCueqOL04"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#correlation check\n",
+        "correlation_columns = [\n",
+        "    \"seats\",\n",
+        "    \"total_mrr\",\n",
+        "    \"total_usage_count\",\n",
+        "    \"unique_features_used\",\n",
+        "    \"total_errors\",\n",
+        "    \"total_tickets\",\n",
+        "    \"avg_resolution_time_hours\",\n",
+        "    \"avg_first_response_minutes\",\n",
+        "    \"satisfaction_clean\",\n",
+        "    \"total_upgrades\",\n",
+        "    \"total_downgrades\",\n",
+        "    \"churn_flag\"\n",
+        "]\n",
+        "\n",
+        "correlation_matrix = master_df[correlation_columns].corr()\n",
+        "\n",
+        "correlation_matrix[\"churn_flag\"].sort_values()"
+      ],
+      "metadata": {
+        "id": "PVW-eycNOSQK"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "**Visualization**"
+      ],
+      "metadata": {
+        "id": "bHvzecKTO2Xs"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#creating a heatmap (to display the correlation matrix)\n",
+        "plt.figure(figsize=(12, 8))\n",
+        "\n",
+        "sns.heatmap(\n",
+        "    correlation_matrix,\n",
+        "    annot=True,\n",
+        "    fmt=\".2f\"\n",
+        ")\n",
+        "\n",
+        "plt.title(\"Correlation Matrix — RavenStack Customer Churn\")\n",
+        "plt.show()"
+      ],
+      "metadata": {
+        "id": "Gln2K_B-OdlX"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#churn distribution\n",
+        "churn_counts = master_df[\"churn_flag\"].value_counts()\n",
+        "plt.figure(figsize=(6,4))\n",
+        "\n",
+        "churn_counts.plot(kind=\"bar\")\n",
+        "\n",
+        "plt.title(\"Customer Distribution by Churn Status\")\n",
+        "plt.xlabel(\"Churn Status\")\n",
+        "plt.ylabel(\"Number of Customers\")\n",
+        "plt.xticks(rotation=0)\n",
+        "\n",
+        "plt.show()"
+      ],
+      "metadata": {
+        "id": "BDIOBORSOmFw"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#usage summary\n",
+        "usage_summary = (\n",
+        "    master_df\n",
+        "    .groupby(\"churn_status\")[\n",
+        "        [\"total_usage_count\", \"unique_features_used\"]\n",
+        "    ]\n",
+        "    .mean()\n",
+        "    .round(2)\n",
+        ")\n",
+        "\n",
+        "usage_summary"
+      ],
+      "metadata": {
+        "id": "dMiWUQzEOypK"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#average usage\n",
+        "plt.figure(figsize=(6,4))\n",
+        "\n",
+        "usage_summary[\"total_usage_count\"].plot(kind=\"bar\")\n",
+        "\n",
+        "plt.title(\"Average Product Usage by Churn Status\")\n",
+        "plt.xlabel(\"Churn Status\")\n",
+        "plt.ylabel(\"Average Usage Count\")\n",
+        "plt.xticks(rotation=0)\n",
+        "\n",
+        "plt.show()"
+      ],
+      "metadata": {
+        "id": "mKge9eC2O57v"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#average uniq features usage\n",
+        "plt.figure(figsize=(6,4))\n",
+        "\n",
+        "usage_summary[\"unique_features_used\"].plot(kind=\"bar\")\n",
+        "\n",
+        "plt.title(\"Average Unique Features Used by Churn Status\")\n",
+        "plt.xlabel(\"Churn Status\")\n",
+        "plt.ylabel(\"Average Features Used\")\n",
+        "plt.xticks(rotation=0)\n",
+        "\n",
+        "plt.show()"
+      ],
+      "metadata": {
+        "id": "WxL2HuoGPFRo"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "#customer satisfaction\n",
+        "plt.figure(figsize=(6,4))\n",
+        "\n",
+        "support_summary[\"satisfaction_clean\"].plot(kind=\"bar\")\n",
+        "\n",
+        "plt.title(\"Average Customer Satisfaction by Churn Status\")\n",
+        "plt.xlabel(\"Churn Status\")\n",
+        "plt.ylabel(\"Average Satisfaction Score\")\n",
+        "plt.xticks(rotation=0)\n",
+        "\n",
+        "plt.show()"
+      ],
+      "metadata": {
+        "id": "1KKdKGqFPLFi"
+      },
+      "execution_count": null,
+      "outputs": []
+    }
+  ]
+}
