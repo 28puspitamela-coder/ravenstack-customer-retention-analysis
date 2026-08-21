@@ -325,9 +325,14 @@
       "cell_type": "code",
       "source": [
         "#check churn distribution\n",
-        "churn_count = master_df[\"churn_flag\"].value_counts()\n",
+        "churn_percentage = (\n",
+        "    master_df[\"churn_flag\"]\n",
+        "    .value_counts(normalize=True)\n",
+        "    .mul(100)\n",
+        "    .round(2)\n",
+        ")\n",
         "\n",
-        "print(churn_count)"
+        "print(churn_percentage)"
       ],
       "metadata": {
         "id": "DCkyhYBCNiWA"
