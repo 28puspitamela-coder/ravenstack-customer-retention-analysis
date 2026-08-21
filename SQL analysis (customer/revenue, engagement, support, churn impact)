@@ -1,0 +1,499 @@
+--SECTION 1. CUSTOMER & REVENUE
+-- Business Question : What is the number of customers? 
+--                     What is the distributin plan?
+--                     How much is the monthly recurring revenue (MRR)
+--					   Which plan generates the highest MRR
+--                     How rebenue changes over time
+--==================================================================
+--1. Total Customer
+select count(*) as total_customer
+from accounts;
+
+--2. How are the Basic, Pro and Enterprise editions distributed
+select
+	plan_tier,
+	count(*) as numbers_customer,
+	round(100.0 * count(*)/ (select count(*) from accounts),1) as percent
+from accounts
+group by plan_tier
+order by numbers_customer desc;
+
+--3. What is the current total MRR (active subscription only)
+select
+	round(sum(mrr_amount),2) as total_mrr_active
+from subscriptions
+where end_date is null; 
+
+--4 Which plan generate highest MRR
+select 
+	plan_tier,
+	round(sum(mrr_amount),2) as total_mrr,
+	count(*) as num_subscription_active,
+	round(avg(mrr_amount),2) as avg_mrr_per_subscription
+from subscriptions
+where end_date is null
+group by plan_tier
+order by total_mrr desc;
+
+--5. How does mrr revenue changes over time
+--(mrr per month depend on start_date subscription)
+select
+	to_char(start_date, 'YYYY-MM') as month,
+	round(sum(mrr_amount),2) as mrr_new,
+	count(*) as num_subscription_new
+from subscriptions
+group by to_char(start_date, 'YYYY-MM')
+order by month;
+
+--SECTION 2: CUSTOMERS ENGAGEMENT
+--Business Question : Does product engagement realet to customer retention?
+--                    Do customer who use the product more actively exhibit
+--                      a different tendency to churn?
+--=========================================================================
+
+--1. Engagement summary per account
+with engagement as (
+	select
+		s.account_id,
+		count(f.usage_id) as total_usage_events,
+		sum(f.usage_count) as total_usage_count,
+		sum(f.usage_duration_secs) as total_duration_secs,
+		count(distinct f.feature_name) as distinct_feature_used,
+		sum(f.error_count) as total_errors,
+		sum(case when f.is_beta_feature then 1 else 0 end) as beta_usage_events
+	from subscriptions s
+	join feature_usage f on f.subscription_id = s.subscription_id
+	group by s.account_id)
+select * from engagement 
+order by total_usage_count desc 
+limit 20;
+
+--2. Comparison of average engagement : churned vs non-churned
+with engagement as (
+	select
+		s.account_id,
+		sum(f.usage_count) as total_usage_count,
+		sum(f.usage_duration_secs) as total_duration_secs,
+		count(distinct f.feature_name) as distinct_features_used,
+		sum(f.error_count) as total_errors
+	from subscriptions s
+	join feature_usage f on f.subscription_id = s.subscription_id
+	group by s.account_id)
+select 
+	a.churn_flag,
+	count(*) as numbers_account,
+	round(avg(e.total_usage_count),1) as avg_usage_count,
+	round(avg(e.total_duration_secs),1) as avg_duration_secs,
+	round(avg(e.distinct_features_used),1) as avg_distinct_features,
+	round(avg(e.total_errors),1) as avg_errors
+from accounts a
+join engagement e on e.account_id = a.account_id 
+group by a.churn_flag;
+
+--3. Engagement tier (quartile) vs churn rate
+with engagement as(
+	select
+		s.account_id,
+		sum(f.usage_count) as total_usage_count
+	from subscriptions s
+	join feature_usage f on f.subscription_id = s.subscription_id
+	group by s.account_id),
+tiered as(
+	select
+		account_id,
+		total_usage_count,
+		ntile(4) over (order by total_usage_count) as usage_quartile
+	from engagement)
+select
+	t.usage_quartile,
+	case t.usage_quartile
+		when 1 then 'Q1 - the lowest'
+		when 2 then 'Q2'
+		when 3 then 'Q3'
+		when 4 then 'Q4 - the highest'
+	end as label,
+	count(*) as numbers_account,
+	sum(case when a.churn_flag then 1 else 0 end) as numbers_churn,
+	round(100.0 * sum(case when a.churn_flag then 1 else 0 end) / count(*),1) as churn_rate_percen,
+	round(avg(t.total_usage_count),0) as avg_usage_count
+from tiered t
+join accounts a on a.account_id = t.account_id
+group by t.usage_quartile
+order by t.usage_quartile;
+
+--4. Do customer who have tried the beta feature churn more or less
+with beta_usage as(
+	select
+		s.account_id,
+		bool_or(f.is_beta_feature) as ever_used_beta
+	from subscriptions s
+	join feature_usage f on f.subscription_id = s.subscription_id
+	group by s.account_id)
+select 
+	coalesce(b.ever_used_beta, false) as have_used_beta,
+	count(*) as numbers_account,
+	sum(case when a.churn_flag then 1 else 0 end) as numbers_churn,
+	round(100.0* sum(case when a.churn_flag then 1 else 0 end)/count(*),1) as churn_rate_percen
+from accounts a
+left join beta_usage b on b.account_id = a.account_id
+group by have_used_beta;
+
+--5. Are the customer with high error rates more prone to churn
+with engagement as(
+	select 
+		s.account_id,
+		sum(f.usage_count) as total_usage_count,
+		sum(f.error_count) as total_errors
+	from subscriptions s
+	join feature_usage f on f.subscription_id = s.subscription_id
+    group by s.account_id)
+select
+    a.churn_flag,
+    round(avg(1.0 * e.total_errors / nullif(e.total_usage_count, 0)), 4) as avg_error_rate
+from accounts a
+join engagement e on e.account_id = a.account_id
+group by a.churn_flag;
+
+-- SECTION 3: CUSTOMER SUPPORT
+-- Business question: Is poor support experience associated with higher churn?
+-- ============================================================
+-- 1. Ticket summary per account
+select
+    account_id,
+    count(*) as numbers_ticket,
+    round(avg(resolution_time_hours), 1) as avg_resolution_hours,
+    round(avg(first_response_time_minutes), 1) as avg_first_response_min,
+    round(avg(satisfaction_score), 2) as avg_satisfaction,
+    sum(case when escalation_flag then 1 else 0 end) as numbers_escalation
+from support_tickets
+group by account_id
+order by numbers_ticket desc
+limit 20;
+
+-- 2. Priority ticket Distribution
+select 
+	priority,
+	count(*) as numbers_ticket,
+	round(100.0 * count(*)/ (select count(*) from support_tickets),1) as percen
+from support_tickets
+group by priority 
+order by numbers_ticket desc;
+
+-- 3. Average of resolution time, first response time, & satisfaction per priority
+select 
+	priority,
+	count(*) as numbers_ticket,
+    round(avg(resolution_time_hours), 1) as avg_resolution_hours,
+    round(avg(first_response_time_minutes), 1) as avg_first_response_min,
+    round(avg(satisfaction_score), 2) as avg_satisfaction
+from support_tickets
+group by priority
+order by case priority
+    when 'low' then 1
+    when 'medium' then 2
+    when 'high' then 3
+    when 'urgent' then 4
+end;
+
+-- 4. Compare the support experience: churned vs non-churned
+with ticket_summary as (
+    select
+        account_id,
+        count(*) as numbers_ticket,
+        sum(case when escalation_flag then 1 else 0 end) as numbers_escalation,
+        round(avg(satisfaction_score), 2) as avg_satisfaction,
+        round(avg(resolution_time_hours), 1) as avg_resolution_hours
+    from support_tickets
+    group by account_id)
+select
+    a.churn_flag,
+    count(*) as numbers_account,
+    round(avg(t.numbers_ticket), 2) as avg_numbers_ticket,
+    round(avg(t.numbers_escalation), 2) as avg_numbers_escalation,
+    round(avg(t.avg_satisfaction), 2) as avg_satisfaction,
+    round(avg(t.avg_resolution_hours), 1) as avg_resolution_hours
+from accounts a
+join ticket_summary t on t.account_id = a.account_id
+group by a.churn_flag;
+
+-- 5. Satisfaction score bucket vs churn rate
+with ticket_summary as (
+    select 
+    	account_id, 
+    	round(avg(satisfaction_score), 2) as avg_satisfaction
+    from support_tickets
+    where satisfaction_score is not null
+    group by account_id),
+bucketed as (
+    select
+        a.account_id,
+        a.churn_flag,
+        case
+            when t.avg_satisfaction is null then 'No Rating'
+            when t.avg_satisfaction < 3.5 then 'Low (<3.5)'
+            when t.avg_satisfaction < 4.5 then 'Medium (3.5-4.5)'
+            else 'High (>=4.5)'
+        end  as satisfaction_bucket
+    from accounts a
+    left join ticket_summary t on t.account_id = a.account_id)
+select
+    satisfaction_bucket,
+    count(*) as numbers_account,
+    sum(case when churn_flag then 1 else 0 end) as numbers_churn,
+    round(100.0 * sum(case when churn_flag then 1 else 0 end) / count(*), 1) as churn_rate_percen
+from bucketed
+group by satisfaction_bucket
+order by churn_rate_percen desc;
+
+-- 6. Escalation rate vs churn rate (per account: has there been at least one escalation or not)
+with ever_escalated as(
+    select account_id, 
+    bool_or(escalation_flag) as ever_escalated
+    from support_tickets
+    group by account_id)
+select
+    coalesce(e.ever_escalated, false) as ever_escalate,
+    count(*) as numbers_account,
+    sum(case when a.churn_flag then 1 else 0 end) as numbers_churn,
+    round(100.0 * sum(case when a.churn_flag then 1 else 0 end) / count(*), 1) as churn_rate_percen
+from accounts a
+left join ever_escalated e on e.account_id = a.account_id
+group by ever_escalate;
+
+-- 7. Resolution time quartile vs churn rate
+with ticket_summary as (
+    select account_id, 
+    	avg(resolution_time_hours ) as avg_resolution_hours
+    from support_tickets
+    group by account_id),
+bucketed as (
+    select
+        a.account_id,
+        a.churn_flag,
+        ntile(4) over (order by t.avg_resolution_hours) as resolution_quartile
+    from accounts a
+    join ticket_summary t on t.account_id = a.account_id)
+select
+    resolution_quartile,
+    count(*) as numbers_count,
+    sum(case when churn_flag then 1 else 0 end) as numbers_churn,
+    round(100.0 * sum(case when churn_flag then 1 else 0 end) / count(*), 1) as churn_rate_percen
+from bucketed
+group by resolution_quartile
+order by resolution_quartile;
+
+-- SECTION 4: CHURN & REVENUE IMPACT
+-- Business question: Which customers are churning and how much
+--                    recurring revenue is potentially affected? 
+-- ============================================================
+
+-- 1. Breakdown alasan churn (reason_code)
+select
+    reason_code,
+    count(*) as numbers_churn_event,
+    round(100.0 * count(*) / (select count(*) from churn_events), 1) as persen
+from churn_events
+group by reason_code
+order by numbers_churn_event desc;
+
+-- 2. Revenue impact per churn reason (MRR a day before churn/churn event)
+with last_sub_before_churn as (
+    select
+        c.churn_event_id,
+        c.account_id,
+        c.reason_code,
+        c.churn_date,
+        s.mrr_amount,
+        row_number() over (partition by c.churn_event_id order by s.start_date desc) as rn
+    from churn_events c
+    join subscriptions s
+        on s.account_id = c.account_id
+        and s.start_date <= c.churn_date)
+select
+    reason_code,
+    count(*) as numbers_churn,
+    round(sum(mrr_amount), 2) as total_mrr_lost,
+    round(avg(mrr_amount), 2) as avg_mrr_per_churn
+from last_sub_before_churn
+where rn = 1
+group by reason_code
+order by total_mrr_lost desc;
+
+-- 3. Total revenue at risk
+-- per account
+with last_sub_before_churn as(
+	select 
+		c.account_id,
+		s.mrr_amount,
+		row_number() over (partition by c.account_id order by s.start_date desc) as rn
+    from churn_events c
+    join subscriptions s
+        on s.account_id = c.account_id
+        and s.start_date <= c.churn_date)
+select
+    round(sum(mrr_amount), 2) as total_mrr_lost_due_churn
+from last_sub_before_churn
+where rn = 1;
+
+-- 4. Total refund per churn reason
+select
+	reason_code,
+	count(*) as numbers_churn,
+	round(sum(refund_amount_usd),2) as total_refund,
+	round(avg(refund_amount_usd),2) as avg_refund
+from churn_events
+group by reason_code
+order by total_refund desc;
+
+-- 5. Is upgrading or downgrading prior to churning a warning sign?
+select
+    preceding_upgrade_flag,
+    preceding_downgrade_flag,
+    count(*) as numbers_churn,                                                         
+    round(100.0 * count(*) / (select count(*) from churn_events), 1) as percen
+from churn_events
+group by preceding_upgrade_flag, preceding_downgrade_flag
+order by numbers_churn desc;
+
+-- 6. How much churn actually results in reactivation (customer returning)?
+select 
+	is_reactivation,
+	count(*) as numbers,
+	round(100.0 * count(*)/ (select count(*) from churn_events),1) as percen
+from churn_events
+group by is_reactivation;
+
+-- 7. Top 10 customers with the highest MRR who churned
+with last_sub_before_churn as(
+    select
+        c.account_id,
+        c.churn_date,
+        c.reason_code,
+        s.mrr_amount,
+        row_number() over (partition by c.account_id order by s.start_date desc) as rn
+    from churn_events c
+    join subscriptions s
+        on s.account_id = c.account_id
+        and s.start_date <= c.churn_date)
+select
+    a.account_id,
+    a.account_name,
+    a.industry,
+    a.plan_tier,
+    l.mrr_amount,
+    l.reason_code,
+    l.churn_date
+from last_sub_before_churn l
+join accounts a on a.account_id = l.account_id
+where l.rn = 1
+order by l.mrr_amount desc
+limit 10;
+
+-- 8. Revenue at risk: the combination of industry and plan churn with the highest churn rate
+-- (as proxy for at-risk active customer segments)
+select 
+    industry,
+    plan_tier,
+    count(*) as total_customer,                                            
+    sum(case when churn_flag then 1 else 0 end) as numbers_churn,
+ 	round(100.0 * sum(case when churn_flag then 1 else 0 end)/count(*),1) as churn_rate_percen
+from accounts
+group by industry, plan_tier
+order by churn_rate_percen desc
+limit 10;
+
+-- MASTER ACCOUNT TABLE FOR TABLEAU
+-- Satu baris per account_id, menggabungkan profil, engagement, satisfaction, dan revenue
+-- ============================================================
+
+with engagement as (
+    select
+        s.account_id,
+        sum(f.usage_count) as total_usage_count,
+        sum(f.usage_duration_secs) as total_duration_secs,
+        count(distinct f.feature_name) as distinct_features_used,
+        sum(f.error_count) as total_errors,
+        bool_or(f.is_beta_feature) as ever_used_beta
+    from subscriptions s
+    join feature_usage f on f.subscription_id = s.subscription_id
+    group by s.account_id
+),
+engagement_tiered as (
+    select
+        account_id,
+        total_usage_count,
+        ntile(4) over (order by total_usage_count) as engagement_quartile
+    from engagement
+),
+support as (
+    select
+        account_id,
+        count(*) as numbers_ticket,
+        round(avg(satisfaction_score), 2) as avg_satisfaction,
+        round(avg(resolution_time_hours), 1) as avg_resolution_hours,
+        bool_or(escalation_flag) as ever_escalated
+    from support_tickets
+    group by account_id
+),
+current_mrr as (
+    select
+        account_id,
+        mrr_amount,
+        row_number() over (partition by account_id order by start_date desc) as rn
+    from subscriptions
+),
+last_mrr_before_churn as (
+    select
+        c.account_id,
+        c.reason_code,
+        c.churn_date,
+        s.mrr_amount as mrr_at_churn,
+        row_number() over (partition by c.account_id order by s.start_date desc) as rn
+    from churn_events c
+    join subscriptions s
+        on s.account_id = c.account_id
+        and s.start_date <= c.churn_date)
+select
+    a.account_id,
+    a.account_name,
+    a.industry,
+    a.plan_tier,
+    a.churn_flag,
+    -- Revenue
+    coalesce(cm.mrr_amount, 0) as current_mrr,
+    lm.mrr_at_churn,
+    lm.reason_code as churn_reason,
+    lm.churn_date,
+    -- Engagement
+    coalesce(e.total_usage_count, 0) as total_usage_count,
+    coalesce(e.total_duration_secs, 0) as total_duration_secs,
+    coalesce(e.distinct_features_used, 0) as distinct_features_used,
+    coalesce(e.total_errors, 0) as total_errors,
+    coalesce(e.ever_used_beta, false) as ever_used_beta,
+    et.engagement_quartile,
+    case et.engagement_quartile
+        when 1 then 'Q1 - Lowest'
+        when 2 then 'Q2'
+        when 3 then 'Q3'
+        when 4 then 'Q4 - Highest'
+        else 'No Usage Data'
+    end as engagement_tier_label,
+    -- Support
+    coalesce(sp.numbers_ticket, 0) as numbers_ticket,
+    sp.avg_satisfaction,
+    case
+        when sp.avg_satisfaction is null then 'No Rating'
+        when sp.avg_satisfaction < 3.5 then 'Low (<3.5)'
+        when sp.avg_satisfaction < 4.5 then 'Medium (3.5-4.5)'
+        else 'High (>=4.5)'
+    end as satisfaction_bucket,
+    sp.avg_resolution_hours,
+    coalesce(sp.ever_escalated, false) as ever_escalated
+from accounts a
+left join engagement e on e.account_id = a.account_id
+left join engagement_tiered et on et.account_id = a.account_id
+left join support sp on sp.account_id = a.account_id
+left join current_mrr cm on cm.account_id = a.account_id and cm.rn = 1
+left join last_mrr_before_churn lm on lm.account_id = a.account_id and lm.rn = 1
+
+order by a.account_id;
