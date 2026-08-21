@@ -5,6 +5,7 @@
 --					   Which plan generates the highest MRR
 --                     How rebenue changes over time
 --==================================================================
+
 --1. Total Customer
 select count(*) as total_customer
 from accounts;
@@ -44,6 +45,46 @@ select
 from subscriptions
 group by to_char(start_date, 'YYYY-MM')
 order by month;
+
+-- Net MRR per month = New MRR (dari subscription baru) - Churned MRR (dari akun yang churn di bulan itu)
+
+--6. Net MRR trend (New MRR - Churned MRR per month) with cumulative growth
+with new_mrr as (
+    select
+        to_char(start_date, 'YYYY-MM') as month,
+        round(sum(mrr_amount), 2) as new_mrr,
+        count(*) as num_new_subscription
+    from subscriptions
+    group by to_char(start_date, 'YYYY-MM')
+),
+churned_mrr as (
+    select
+        to_char(c.churn_date, 'YYYY-MM') as month,
+        round(sum(s.mrr_amount), 2) as churned_mrr,
+        count(*) as num_churned_subscription
+    from churn_events c
+    join subscriptions s
+        on s.account_id = c.account_id
+        and s.start_date <= c.churn_date
+    where s.start_date = (
+        select max(s2.start_date)
+        from subscriptions s2
+        where s2.account_id = c.account_id
+          and s2.start_date <= c.churn_date
+    )
+    group by to_char(c.churn_date, 'YYYY-MM')
+)
+select
+    coalesce(n.month, c.month) as month,
+    coalesce(n.new_mrr, 0) as new_mrr,
+    coalesce(c.churned_mrr, 0) as churned_mrr,
+    round(coalesce(n.new_mrr, 0) - coalesce(c.churned_mrr, 0), 2) as net_mrr_change,
+    round(sum(coalesce(n.new_mrr, 0) - coalesce(c.churned_mrr, 0)) 
+          over (order by coalesce(n.month, c.month)), 2) as cumulative_mrr
+from new_mrr n
+full outer join churned_mrr c on n.month = c.month
+order by month;
+
 
 --SECTION 2: CUSTOMERS ENGAGEMENT
 --Business Question : Does product engagement realet to customer retention?
