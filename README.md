@@ -3,7 +3,7 @@
 Bootcamp case study (Dibimbing Data Analyst Bootcamp). Identifies who is churning, why, and how much recurring revenue is at risk for RavenStack, a SaaS company with 500 customers, using SQL, Python, and Tableau.
 
 **Full portfolio write-up with dashboard:** [Notion](https://concrete-kidney-703.notion.site/RavenStack-Customer-Retention-Revenue-Risk-Analysis-3c33c020afa8806fb241c8dae47ddc35)
-**Interactive dashboard:** [Tableau Public](LINK_TABLEAU_PUBLIC_KAMU)
+**Interactive dashboard:** [Tableau Public](https://public.tableau.com/views/RavenStack-PortofolioAssginment/Dashboard1?:language=en-GB&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link)
 
 ## Business Questions
 
